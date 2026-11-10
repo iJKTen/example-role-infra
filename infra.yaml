@@ -1,0 +1,280 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Git Sync IAM role that CloudFormation assumes to deploy the certificate and
+  site infrastructure stacks. Permissions live in three customer-managed
+  policies attached to the role, split by concern, so each stays well under the
+  managed-policy size limit and the role never approaches the inline-policy
+  aggregate limit. The role is complete and self-contained.
+
+Resources:
+  # ───────────────────────────────────────────────────────────────────────────
+  # Platform: what Git Sync and CloudFormation need regardless of what is being
+  # deployed, plus this role's own self-management.
+  # ───────────────────────────────────────────────────────────────────────────
+  GitSyncPlatformPolicy:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Properties:
+      Path: /gitsync/
+      Description: CloudFormation, EventBridge, and self-management for the Git Sync role.
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Plan and apply stack changes through change sets.
+          - Effect: Allow
+            Action:
+              - 'cloudformation:CreateChangeSet'
+              - 'cloudformation:DeleteChangeSet'
+              - 'cloudformation:DescribeChangeSet'
+              - 'cloudformation:DescribeStackEvents'
+              - 'cloudformation:DescribeStacks'
+              - 'cloudformation:ExecuteChangeSet'
+              - 'cloudformation:GetTemplate'
+              - 'cloudformation:ListChangeSets'
+              - 'cloudformation:ListStacks'
+              - 'cloudformation:ValidateTemplate'
+            Resource: '*'
+          # Manage the EventBridge rules Git Sync owns for its sync triggers.
+          - Effect: Allow
+            Action:
+              - 'events:PutRule'
+              - 'events:PutTargets'
+              - 'events:DeleteRule'
+              - 'events:RemoveTargets'
+            Resource: '*'
+            Condition:
+              StringEquals:
+                'events:ManagedBy': 'cloudformation.sync.codeconnections.amazonaws.com'
+          # Read those EventBridge rules.
+          - Effect: Allow
+            Action:
+              - 'events:DescribeRule'
+            Resource: '*'
+          # Update this role itself: trust policy, tags, and policy attachments.
+          - Effect: Allow
+            Action:
+              - 'iam:GetRole'
+              - 'iam:UpdateAssumeRolePolicy'
+              - 'iam:AttachRolePolicy'
+              - 'iam:DetachRolePolicy'
+              - 'iam:ListAttachedRolePolicies'
+              - 'iam:ListRolePolicies'
+              - 'iam:TagRole'
+              - 'iam:UntagRole'
+              - 'iam:ListRoleTags'
+            Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/CloudFormationGitSyncRole'
+          # Version this role's own managed policies so Git Sync can edit them.
+          - Effect: Allow
+            Action:
+              - 'iam:CreatePolicy'
+              - 'iam:DeletePolicy'
+              - 'iam:GetPolicy'
+              - 'iam:GetPolicyVersion'
+              - 'iam:ListPolicyVersions'
+              - 'iam:CreatePolicyVersion'
+              - 'iam:DeletePolicyVersion'
+              - 'iam:SetDefaultPolicyVersion'
+            Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:policy/gitsync/*'
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Certificate stack: ACM and the Route 53 DNS it validates against (Route 53
+  # is reused by the site stack's alias records).
+  # ───────────────────────────────────────────────────────────────────────────
+  CertificateStackPolicy:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Properties:
+      Path: /gitsync/
+      Description: ACM and Route 53 for the certificate stack and DNS records.
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Issue, tag, and delete the site's ACM certificate.
+          - Effect: Allow
+            Action:
+              - 'acm:RequestCertificate'
+              - 'acm:DescribeCertificate'
+              - 'acm:DeleteCertificate'
+              - 'acm:AddTagsToCertificate'
+              - 'acm:RemoveTagsFromCertificate'
+              - 'acm:ListTagsForCertificate'
+              - 'acm:ListCertificates'
+            Resource: '*'
+          # Write DNS validation and alias records in the hosted zone.
+          - Effect: Allow
+            Action:
+              - 'route53:ChangeResourceRecordSets'
+              - 'route53:GetHostedZone'
+              - 'route53:GetChange'
+              - 'route53:ListResourceRecordSets'
+            Resource: '*'
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Site stack: S3, CloudFront, the CI/CD pipeline, the empty-bucket Lambda, the
+  # site's own service roles (scoped by the /site/ path), the shared connection,
+  # and log groups.
+  # ───────────────────────────────────────────────────────────────────────────
+  SiteStackPolicy:
+    Type: 'AWS::IAM::ManagedPolicy'
+    Properties:
+      Path: /gitsync/
+      Description: S3, CloudFront, CodePipeline, CodeBuild, Lambda, site IAM roles, and logs for the site stack.
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # Create and configure the website and artifact buckets.
+          - Effect: Allow
+            Action:
+              - 's3:CreateBucket'
+              - 's3:DeleteBucket'
+              - 's3:PutBucketPublicAccessBlock'
+              - 's3:GetBucketPublicAccessBlock'
+              - 's3:PutBucketVersioning'
+              - 's3:GetBucketVersioning'
+              - 's3:PutEncryptionConfiguration'
+              - 's3:GetEncryptionConfiguration'
+              - 's3:PutLifecycleConfiguration'
+              - 's3:GetLifecycleConfiguration'
+              - 's3:PutBucketTagging'
+              - 's3:GetBucketTagging'
+              - 's3:PutBucketPolicy'
+              - 's3:GetBucketPolicy'
+              - 's3:DeleteBucketPolicy'
+            Resource: '*'
+          # Manage the distribution, origin access control, headers policy, and function.
+          - Effect: Allow
+            Action:
+              - 'cloudfront:CreateDistribution'
+              - 'cloudfront:UpdateDistribution'
+              - 'cloudfront:DeleteDistribution'
+              - 'cloudfront:GetDistribution'
+              - 'cloudfront:TagResource'
+              - 'cloudfront:UntagResource'
+              - 'cloudfront:ListTagsForResource'
+              - 'cloudfront:CreateOriginAccessControl'
+              - 'cloudfront:DeleteOriginAccessControl'
+              - 'cloudfront:GetOriginAccessControl'
+              - 'cloudfront:UpdateOriginAccessControl'
+              - 'cloudfront:CreateResponseHeadersPolicy'
+              - 'cloudfront:GetResponseHeadersPolicy'
+              - 'cloudfront:UpdateResponseHeadersPolicy'
+              - 'cloudfront:DeleteResponseHeadersPolicy'
+              - 'cloudfront:CreateFunction'
+              - 'cloudfront:GetFunction'
+              - 'cloudfront:UpdateFunction'
+              - 'cloudfront:DeleteFunction'
+              - 'cloudfront:PublishFunction'
+              - 'cloudfront:DescribeFunction'
+            Resource: '*'
+          # Manage the CI/CD pipeline.
+          - Effect: Allow
+            Action:
+              - 'codepipeline:CreatePipeline'
+              - 'codepipeline:UpdatePipeline'
+              - 'codepipeline:DeletePipeline'
+              - 'codepipeline:GetPipeline'
+              - 'codepipeline:GetPipelineState'
+              - 'codepipeline:TagResource'
+              - 'codepipeline:UntagResource'
+              - 'codepipeline:ListTagsForResource'
+            Resource: '*'
+          # Manage the build and deploy projects.
+          - Effect: Allow
+            Action:
+              - 'codebuild:CreateProject'
+              - 'codebuild:UpdateProject'
+              - 'codebuild:DeleteProject'
+              - 'codebuild:BatchGetProjects'
+            Resource: '*'
+          # Manage the empty-bucket custom-resource function.
+          - Effect: Allow
+            Action:
+              - 'lambda:CreateFunction'
+              - 'lambda:DeleteFunction'
+              - 'lambda:GetFunction'
+              - 'lambda:GetFunctionConfiguration'
+              - 'lambda:UpdateFunctionCode'
+              - 'lambda:UpdateFunctionConfiguration'
+              - 'lambda:InvokeFunction'
+              - 'lambda:TagResource'
+              - 'lambda:UntagResource'
+              - 'lambda:ListTags'
+            Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:*EmptyBucket'
+          # Create and manage the site stack's service roles under /site/.
+          - Effect: Allow
+            Action:
+              - 'iam:CreateRole'
+              - 'iam:GetRole'
+              - 'iam:DeleteRole'
+              - 'iam:UpdateRole'
+              - 'iam:PutRolePolicy'
+              - 'iam:GetRolePolicy'
+              - 'iam:DeleteRolePolicy'
+              - 'iam:ListRolePolicies'
+              - 'iam:ListAttachedRolePolicies'
+              - 'iam:ListRoleTags'
+              - 'iam:TagRole'
+              - 'iam:UntagRole'
+              - 'iam:UpdateAssumeRolePolicy'
+            Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/site/*'
+          # Hand those roles to CodePipeline, CodeBuild, and Lambda only.
+          - Effect: Allow
+            Action:
+              - 'iam:PassRole'
+            Resource: !Sub 'arn:aws:iam::${AWS::AccountId}:role/site/*'
+            Condition:
+              StringEquals:
+                'iam:PassedToService':
+                  - codepipeline.amazonaws.com
+                  - codebuild.amazonaws.com
+                  - lambda.amazonaws.com
+          # Pass the shared GitHub connection to the pipeline (legacy prefix).
+          - Effect: Allow
+            Action:
+              - 'codestar-connections:PassConnection'
+            Resource: !ImportValue 'Example-GitHubConnectionArn'
+            Condition:
+              StringEquals:
+                'codestar-connections:PassedToService': codepipeline.amazonaws.com
+          # Pass the shared GitHub connection to the pipeline (current prefix).
+          - Effect: Allow
+            Action:
+              - 'codeconnections:PassConnection'
+            Resource: !ImportValue 'Example-GitHubConnectionArn'
+            Condition:
+              StringEquals:
+                'codeconnections:PassedToService': codepipeline.amazonaws.com
+          # Manage log groups for the build, deploy, and Lambda.
+          - Effect: Allow
+            Action:
+              - 'logs:CreateLogGroup'
+              - 'logs:DeleteLogGroup'
+              - 'logs:PutRetentionPolicy'
+            Resource: '*'
+
+  CloudFormationGitSyncRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName: CloudFormationGitSyncRole
+      # TRUST POLICY: who may assume this role, not what it can do.
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                # The Git Sync service that starts deployments on a repo change.
+                - cloudformation.sync.codeconnections.amazonaws.com
+                # CloudFormation itself, which assumes the role to create,
+                # update, and delete the stack's resources.
+                - cloudformation.amazonaws.com
+            Action: 'sts:AssumeRole'
+            Condition:
+              StringEquals:
+                # Locks both principals to this account, guarding against a
+                # confused deputy from another account's Git Sync config.
+                'aws:SourceAccount': !Sub '${AWS::AccountId}'
+      # Permissions are attached as customer-managed policies rather than inline,
+      # so the role never approaches the 10,240-character inline aggregate limit.
+      ManagedPolicyArns:
+        - !Ref GitSyncPlatformPolicy
+        - !Ref CertificateStackPolicy
+        - !Ref SiteStackPolicy
